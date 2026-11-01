@@ -88,12 +88,31 @@ couples/{cid}/expenses/{id}
 couples/{cid}/settlements/{id}    id, date, from, to, amount
 couples/{cid}/fixedCosts/{id}     id, cat, memo, amount, day, payer, lastYm
 couples/{cid}/notes/{id}          id, text, by, at, done（要望メモ）
+couples/{cid}/shopping/{id}       id, name, key(正規化した名前), cat, memo, by, at, done,
+                                  doneAt(ms), doneBy, doneDate, expensed（買い物リスト）
+couples/{cid}/shopStats/{id}      id(key のハッシュ), key, name, cat, dates(直近10回の購入日), count, lastAt
 
 invites/{code}                    {cid, createdAt}。コード → カップルの対応
 ```
 
 - 標準カテゴリは8つで、コードに固定（`food 食費`、`daily 日用品`、`eat 外食`、`trip 旅行`、`rent 家賃`、`util 光熱費`、`fun 娯楽`、`other その他`）。追加カテゴリは「その他」の前に並ぶ。削除したカテゴリの支出は「その他」として表示する。
 - 端末ごとの設定は localStorage に置く: `pairmane.cid`（接続先）、`pairmane.seen`（通知の既読時刻）、`pairmane.theme`、`pairmane.font`。
+
+### 読み込む範囲（無料枠の節約）
+
+- 支出は2つの購読に分ける: ①先月1日以降の支出、②未精算の支出（月を問わず）。精算残高・確定待ち・予算・通知はこの2つで足りる。
+- 先月より前の月は、履歴・レポートで「この月のデータを読み込む」を押したときに1回だけ読む（`loadMonths`）。読み込んだ月は `EXP.extra` に持ち、編集・削除・精算のときに手元のコピーも直す。
+- レポートの6か月推移は、読み込んでいない月を点線の棒で表示し、「過去6か月分を読み込む」で補う。
+- バックアップと全削除は、押したときに全件を読み込む。
+- 月をまたいでアプリを開いたままの場合は、前面に戻ったときに購読を張り直す。
+
+### 買い物リスト
+
+- 購読は ①未購入（`done == false`）、②直近30日に購入（`doneAt >= 30日前`）、③`shopStats` 全件。
+- 丸を押すと `done:true` と購入日を記録し、`shopStats` の `dates` に今日を足す（同じ日は1回、直近10回まで）。戻すと取り消す。
+- 周期: 購入日が2回以上ある品目は、(最後 − 最初) ÷ (回数 − 1) を平均日数とし、前回からの経過日数が平均の85%以上で「そろそろ買う時期」に出す。
+- 「支出に記録」: 今日買って、まだ記録していない品目の名前をメモに入れ、いちばん多いカテゴリを選んだ状態で支出の追加画面を開く。保存すると、その品目に `expensed:true` を付ける。
+- ルールが未公開でも他の機能は動く（買い物タブに「ルールの更新が必要」と出る）。
 
 ## 4. ログインと接続
 
@@ -113,7 +132,7 @@ invites/{code}                    {cid, createdAt}。コード → カップル�
 
 ## 6. 画面
 
-ホーム / レポート / 履歴 / 設定 の4タブと、追加・編集、精算、固定費、カテゴリと予算、要望メモ、使い方のシート。
+ホーム / 買い物 / レポート / 履歴 / 設定 の5タブと、追加・編集、精算、固定費、カテゴリと予算、要望メモ、使い方のシート。
 
 - ロゴ: 「にっこりコイン」。`index.html` の `LOGO_MARK`（SVG）と `logoHTML()`。アイコンは同じ絵を淡いラベンダー（#e8edff）の背景に置いたもの
 - 配色: インディゴ（#3b5bdb）が基調。a＝青（#4c6ef5）、b＝ピンク（#f06595）。ダークテーマあり

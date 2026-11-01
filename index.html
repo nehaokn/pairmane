@@ -260,7 +260,7 @@ function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2
 /* ---------- state + cloud ---------- */
 var app=initializeApp(FIREBASE_CONFIG),auth=getAuth(app);
 var db=initializeFirestore(app,{localCache:persistentLocalCache({tabManager:persistentMultipleTabManager()})});
-var S={v:2,sample:false,ratioA:70,members:{a:{name:'わたし',photo:null},b:{name:'パートナー',photo:null}},memberUids:[],inviteCode:'',expenses:[],settlements:[],fixed:[],notes:[],cats:[],budgets:{}};
+var S={v:2,sample:false,ratioA:70,members:{a:{name:'わたし',photo:null},b:{name:'パートナー',photo:null}},memberUids:[],inviteCode:'',expenses:[],settlements:[],fixed:[],notes:[],cats:[],budgets:{},shopBlocked:false};
 var UID=null,CID=null,phase='boot',unsubs=[],loaded={},dirty=false,fixedRan=false;
 var wmode='',werr='',gMe='',gPt='',gCode='',gEmail='',gPw='';
 function nm(w){return S.members[w].name;}
@@ -278,6 +278,124 @@ function runOps(ops){ /* chunked batches, 400 writes each */
 }
 function rid(n,al){var a=new Uint8Array(n),o='';crypto.getRandomValues(a);for(var i=0;i<n;i++)o+=al[a[i]%al.length];return o;}
 function cacheCid(c){try{if(c)localStorage.setItem('pairmane.cid',c);else localStorage.removeItem('pairmane.cid');}catch(e){}}
+/* shopping list: items not yet bought + bought in the last 30 days are live; purchase dates per item live in shopStats */
+var SHOP={active:[],recent:[],stats:[]},shName='',shMemo='',shCat='food';
+function startShopSync(first){
+  SHOP={active:[],recent:[],stats:[]};S.shopBlocked=false;
+  var blocked=function(e){if(e&&e.code==='permission-denied'){S.shopBlocked=true;if(phase==='ready')refresh();}};
+  var docs=function(snap){return snap.docs.map(function(d){return Object.assign({id:d.id},d.data());});};
+  unsubs.push(onSnapshot(query(ccol('shopping'),where('done','==',false)),function(snap){
+    SHOP.active=docs(snap);S.shopBlocked=false;
+    if(first.shop){
+      snap.docChanges().forEach(function(ch){
+        if(ch.type!=='added'||ch.doc.metadata.hasPendingWrites)return;
+        var d=ch.doc.data();
+        if(d.by&&d.by!==me()&&!d.doneDate)announce(nm(d.by)+'が「'+d.name+'」を買い物リストに追加しました');
+      });
+    }
+    first.shop=true;if(phase==='ready')refresh();
+  },blocked));
+  unsubs.push(onSnapshot(query(ccol('shopping'),where('doneAt','>=',Date.now()-30*864e5)),function(snap){SHOP.recent=docs(snap);if(phase==='ready')refresh();},blocked));
+  unsubs.push(onSnapshot(ccol('shopStats'),function(snap){SHOP.stats=docs(snap);if(phase==='ready')refresh();},blocked));
+}
+function normKey(n){return String(n).normalize('NFKC').trim().toLowerCase().replace(/\s+/g,'');}
+function hkey(k){var h=2166136261;for(var i=0;i<k.length;i++){h^=k.charCodeAt(i);h=Math.imul(h,16777619);}return 'k'+(h>>>0).toString(36);}
+function statOf(name){var id=hkey(normKey(name));return SHOP.stats.filter(function(x){return x.id===id;})[0]||null;}
+function daysBetween(a,b){return Math.round((pd(b)-pd(a))/864e5);}
+function cycleOf(st){
+  if(!st||!st.dates)return null;
+  var d=st.dates.slice().sort().filter(function(x,i,a){return i===0||x!==a[i-1];});
+  var last=d[d.length-1],el=last?daysBetween(last,today()):null;
+  if(d.length<2)return last?{last:last,el:el,avg:0,due:false}:null;
+  var avg=Math.round(daysBetween(d[0],last)/(d.length-1));
+  return {last:last,el:el,avg:avg,due:avg>0&&el>=Math.max(1,Math.round(avg*0.85))};
+}
+function onList(name){var k=normKey(name);return SHOP.active.some(function(x){return x.key===k;});}
+function addShop(name,c,memo){
+  name=String(name||'').trim();if(!name){toast('買うものを入力してください');return false;}
+  if(onList(name)){toast('「'+name+'」はもうリストにあります');return false;}
+  var o={id:uid(),name:name.slice(0,30),key:normKey(name),cat:c||'other',memo:String(memo||'').trim().slice(0,30),by:me(),at:Date.now(),done:false};
+  SHOP.active.push(o);putDoc('shopping',o);return true;
+}
+function checkShop(id){
+  var it=SHOP.active.filter(function(x){return x.id===id;})[0];if(!it)return;
+  var t=today(),st=statOf(it.name)||{id:hkey(it.key||normKey(it.name)),key:it.key||normKey(it.name),name:it.name,cat:it.cat,dates:[],count:0};
+  var dates=(st.dates||[]).concat([t]).filter(function(x,i,a){return a.indexOf(x)===i;}).sort().slice(-10);
+  var ns={id:st.id,key:st.key,name:it.name,cat:it.cat,dates:dates,count:(st.count||0)+1,lastAt:Date.now()};
+  var upd={done:true,doneAt:Date.now(),doneBy:me(),doneDate:t};
+  SHOP.active=SHOP.active.filter(function(x){return x.id!==id;});SHOP.recent.push(Object.assign({},it,upd));
+  runOps([function(w){w.update(doc(ccol('shopping'),id),upd);},function(w){w.set(doc(ccol('shopStats'),ns.id),ns);}]);
+}
+function uncheckShop(id){
+  var it=SHOP.recent.filter(function(x){return x.id===id;})[0];if(!it)return;
+  var st=statOf(it.name),ops=[function(w){w.update(doc(ccol('shopping'),id),{done:false,doneAt:deleteField(),doneBy:deleteField(),doneDate:deleteField(),expensed:deleteField()});}];
+  if(st){
+    var others=SHOP.recent.some(function(x){return x.id!==id&&x.key===it.key&&x.doneDate===it.doneDate;});
+    var dates=others?st.dates:(st.dates||[]).filter(function(x){return x!==it.doneDate;});
+    ops.push(function(w){w.set(doc(ccol('shopStats'),st.id),Object.assign({},st,{dates:dates,count:Math.max(0,(st.count||1)-1)}));});
+  }
+  SHOP.recent=SHOP.recent.filter(function(x){return x.id!==id;});SHOP.active.push(Object.assign({},it,{done:false}));
+  runOps(ops);
+}
+function openShopExpense(){
+  var items=shopTodayUnrecorded();if(!items.length)return;
+  var cnt={};items.forEach(function(x){cnt[x.cat]=(cnt[x.cat]||0)+1;});
+  var top=Object.keys(cnt).sort(function(a,b){return cnt[b]-cnt[a];})[0];
+  editing=null;F=newForm();F.cat=top;F.payer=me();
+  F.memo=items.map(function(x){return x.name;}).join('、').slice(0,100);F.shopIds=items.map(function(x){return x.id;});
+  paintSheet();
+}
+function shopTodayUnrecorded(){var t=today();return SHOP.recent.filter(function(x){return x.doneDate===t&&!x.expensed;});}
+function vShop(){
+  var cats=allCats(),order={};cats.forEach(function(c,i){order[c.id]=i;});
+  var act=SHOP.active.slice().sort(function(a,b){var oa=a.cat in order?order[a.cat]:99,ob=b.cat in order?order[b.cat]:99;return oa-ob||(a.at||0)-(b.at||0);});
+  var groups=[];act.forEach(function(x){var g=groups[groups.length-1];if(!g||g.cat!==x.cat){g={cat:x.cat,items:[]};groups.push(g);}g.items.push(x);});
+  var due=SHOP.stats.map(function(st){return {st:st,cy:cycleOf(st)};}).filter(function(x){return x.cy&&x.cy.due&&!onList(x.st.name);}).sort(function(a,b){return (b.cy.el/b.cy.avg)-(a.cy.el/a.cy.avg);});
+  var freq=SHOP.stats.filter(function(st){return !onList(st.name)&&!due.some(function(d){return d.st.id===st.id;});}).sort(function(a,b){return (b.count||0)-(a.count||0);}).slice(0,12);
+  var rec=SHOP.recent.slice().sort(function(a,b){return (b.doneAt||0)-(a.doneAt||0);});
+  var todayN=shopTodayUnrecorded();
+  var circle=function(on,act,id,label){return '<button type="button" class="swatch" style="--c:'+(on?'var(--pri)':'var(--card)')+';width:30px;height:30px;color:#fff;display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 0 0 2px '+(on?'var(--pri)':'var(--line)')+'" data-act="'+act+'" data-id="'+id+'" aria-label="'+label+'">'+(on?svg('check',3).replace('<svg','<svg width="16" height="16"'):'')+'</button>';};
+  var cyText=function(name){var cy=cycleOf(statOf(name));if(!cy)return '';return '前回 '+md(cy.last)+(cy.avg?' ・ 平均'+cy.avg+'日ごと':'');};
+  var row=function(x){var c=cat(x.cat),sub=[x.memo,cyText(x.name),nm(x.by||'a')+'が追加'].filter(Boolean).join(' ・ ');
+    return '<div class="item" style="cursor:default">'+circle(false,'sh-check',x.id,'買った')+'<div class="grow"><div style="font-weight:700;word-break:break-word">'+esc(x.name)+'</div><div class="sub" style="font-size:12px">'+esc(sub)+'</div></div><button type="button" class="xbtn" style="width:34px;height:34px;border:0;background:transparent" data-act="sh-del" data-id="'+x.id+'" aria-label="削除">'+svg('x',2.2).replace('<svg','<svg width="16" height="16"')+'</button></div>';};
+  var chip=function(st,extra){var c=cat(st.cat);return '<button type="button" class="pill" style="display:inline-flex;align-items:center;gap:6px" data-act="sh-quick" data-k="'+st.id+'"><span class="dot" style="--c:'+c.color+'"></span>'+esc(st.name)+(extra?'<span class="sub" style="font-size:11px">'+esc(extra)+'</span>':'')+'<span style="color:var(--pri);font-weight:700">＋</span></button>';};
+  return '<div class="row between"><h1 class="title">買い物</h1><span class="sub">'+act.length+'件</span></div>'+
+  (S.shopBlocked?'<div class="notice" style="background:var(--warn-bg);color:var(--warn-ink)"><span>買い物リストを使うには、Firebaseでルールの更新が必要です</span></div>':'')+
+  '<div class="card sec" style="gap:10px"><div class="row" style="gap:8px"><input id="sh-name" class="field grow" placeholder="買うもの(例: お米)" maxlength="30" value="'+esc(shName)+'" autocomplete="off" enterkeyhint="done" aria-label="買うもの"><button type="button" class="btn btn-pri" style="height:46px;padding:0 18px;flex:none" data-act="sh-add">追加</button></div>'+
+  '<div class="row" style="gap:8px"><select id="sh-cat" class="field" style="width:auto;flex:none" aria-label="カテゴリ">'+cats.map(function(c){return '<option value="'+c.id+'"'+(c.id===shCat?' selected':'')+'>'+esc(c.name)+'</option>';}).join('')+'</select><input id="sh-memo" class="field grow" placeholder="メモ(数量など)" maxlength="30" value="'+esc(shMemo)+'" autocomplete="off" aria-label="メモ"></div></div>'+
+  (due.length?'<div class="sec"><h2 class="h2 row" style="gap:6px;color:var(--warn-ink)">'+svg('clock').replace('<svg','<svg width="16" height="16"')+'そろそろ買う時期</h2><div class="row" style="flex-wrap:wrap;gap:8px">'+due.map(function(d){return chip(d.st,'平均'+d.cy.avg+'日・'+d.cy.el+'日経過');}).join('')+'</div></div>':'')+
+  (todayN.length?'<div class="notice" style="flex-wrap:wrap"><span>今日買った'+todayN.length+'品を、支出として記録できます</span><button type="button" data-act="sh-expense">支出に記録</button></div>':'')+
+  '<div class="sec"><h2 class="h2">買うもの</h2>'+(groups.length?groups.map(function(g){var c=cat(g.cat);return '<div class="sec" style="gap:8px"><div class="row sub" style="gap:6px;font-weight:700"><span class="dot" style="--c:'+c.color+'"></span>'+esc(c.name)+'</div>'+g.items.map(row).join('')+'</div>';}).join(''):'<div class="empty">買うものはありません。上の入力欄から追加できます</div>')+'</div>'+
+  (freq.length?'<div class="sec"><h2 class="h2 sub">よく買うもの</h2><div class="row" style="flex-wrap:wrap;gap:8px">'+freq.map(function(st){return chip(st,'');}).join('')+'</div></div>':'')+
+  (rec.length?'<details class="sec"'+(todayN.length?' open':'')+'><summary class="h2 sub">買ったもの(30日間) '+rec.length+'件</summary><div class="sec" style="margin-top:10px">'+rec.map(function(x){return '<div class="item" style="cursor:default;opacity:.75">'+circle(true,'sh-uncheck',x.id,'買っていないに戻す')+'<div class="grow"><div style="font-weight:700;text-decoration:line-through">'+esc(x.name)+'</div><div class="sub" style="font-size:12px">'+md(x.doneDate||today())+' ・ '+esc(nm(x.doneBy||'a'))+'が購入'+(x.expensed?' ・ 支出に記録済み':'')+'</div></div></div>';}).join('')+'</div></details>':'');
+}
+
+/* expenses: this month + last month and every unsettled one are live; older months load on demand */
+var EXP={recent:[],open:[],extra:{}},EXL={},EXLOADING={},EXBASE='';
+function baseYm(){var p=ym(today()).split('-');return ymAdd(+p[0],+p[1],-1);}
+function monthLoaded(k){return k>=EXBASE||!!EXL[k];}
+function mergeExp(){
+  var m={};
+  Object.keys(EXP.extra).forEach(function(k){EXP.extra[k].forEach(function(e){m[e.id]=e;});});
+  EXP.open.forEach(function(e){m[e.id]=e;});
+  EXP.recent.forEach(function(e){m[e.id]=e;});
+  S.expenses=Object.keys(m).map(function(k){return m[k];});
+}
+function exPatch(o){var k=ym(o.date);Object.keys(EXP.extra).forEach(function(m){EXP.extra[m]=EXP.extra[m].filter(function(e){return e.id!==o.id;});});if(EXP.extra[k])EXP.extra[k].push(o);mergeExp();}
+function exRemove(id){Object.keys(EXP.extra).forEach(function(m){EXP.extra[m]=EXP.extra[m].filter(function(e){return e.id!==id;});});mergeExp();}
+function loadMonths(list){
+  list=list.filter(function(k){return !monthLoaded(k)&&!EXLOADING[k];});
+  if(!list.length)return;
+  list.forEach(function(k){EXLOADING[k]=true;});render();
+  Promise.all(list.map(function(k){
+    return getDocs(query(ccol('expenses'),where('date','>=',k+'-01'),where('date','<',shiftMonth(k,1)+'-01'))).then(function(qs){
+      EXP.extra[k]=qs.docs.map(function(d){return Object.assign({id:d.id},d.data());});EXL[k]=true;
+    });
+  })).then(function(){mergeExp();},function(){toast('読み込めませんでした。通信状況を確認してください');}).then(function(){list.forEach(function(k){delete EXLOADING[k];});refresh();});
+}
+function loadBtn(k,label){
+  return '<div class="card sec" style="gap:10px;text-align:center"><div class="sub">'+esc(label)+'</div><button type="button" class="btn btn-soft" style="height:44px" data-act="load-month" data-m="'+k+'"'+(EXLOADING[k]?' disabled':'')+'>'+(EXLOADING[k]?'読み込み中…':ymLabel(k)+'のデータを読み込む')+'</button></div>';
+}
 function stopSync(){unsubs.forEach(function(u){try{u();}catch(e){}});unsubs=[];loaded={};}
 function startSync(cid){
   stopSync();CID=cid;fixedRan=false;
@@ -293,16 +411,32 @@ function startSync(cid){
     S.cats=d.cats||[];S.budgets=d.budgets||{};
     loaded.c=true;afterLoad();
   },bad));
-  var first={};
-  [['expenses','expenses'],['settlements','settlements'],['fixedCosts','fixed'],['notes','notes']].forEach(function(x){
+  var first={};EXP={recent:[],open:[],extra:{}};EXL={};EXBASE=baseYm();
+  var since=EXBASE+'-01';
+  unsubs.push(onSnapshot(query(ccol('expenses'),where('date','>=',since)),function(snap){
+    EXP.recent=snap.docs.map(function(d){return Object.assign({id:d.id},d.data());});
+    if(first.expRecent){
+      snap.docChanges().forEach(function(ch){
+        if(ch.type!=='added'||ch.doc.metadata.hasPendingWrites)return;
+        var d=ch.doc.data();
+        if(d.by&&d.by!=='x'&&d.by!==me())announce(nm(d.by)+'が '+cat(d.cat).name+' '+yen(d.amount)+' を追加しました');
+      });
+    }
+    first.expRecent=true;loaded.expRecent=true;mergeExp();afterLoad();
+  },bad));
+  unsubs.push(onSnapshot(query(ccol('expenses'),where('settled','==',false)),function(snap){
+    EXP.open=snap.docs.map(function(d){return Object.assign({id:d.id},d.data());});
+    loaded.expOpen=true;mergeExp();afterLoad();
+  },bad));
+  startShopSync(first);
+  [['settlements','settlements'],['fixedCosts','fixed'],['notes','notes']].forEach(function(x){
     unsubs.push(onSnapshot(ccol(x[0]),function(snap){
       S[x[1]]=snap.docs.map(function(d){return Object.assign({id:d.id},d.data());});
       if(first[x[0]]){
         snap.docChanges().forEach(function(ch){
           if(ch.type!=='added'||ch.doc.metadata.hasPendingWrites)return;
           var d=ch.doc.data();
-          if(x[0]==='expenses'&&d.by&&d.by!=='x'&&d.by!==me()){announce(nm(d.by)+'が '+cat(d.cat).name+' '+yen(d.amount)+' を追加しました');}
-          else if(x[0]==='settlements'){announce('精算が確定されました '+yen(d.amount));}
+          if(x[0]==='settlements'){announce('精算が確定されました '+yen(d.amount));}
         });
       }
       first[x[0]]=true;loaded[x[0]]=true;afterLoad();
@@ -311,7 +445,7 @@ function startSync(cid){
 }
 function announce(msg){toast(msg,4500);}
 function afterLoad(){
-  if(!(loaded.c&&loaded.expenses&&loaded.settlements&&loaded.fixedCosts&&loaded.notes))return;
+  if(!(loaded.c&&loaded.expRecent&&loaded.expOpen&&loaded.settlements&&loaded.fixedCosts&&loaded.notes))return;
   if(phase!=='ready'){phase='ready';cacheCid(CID);try{if(!localStorage.getItem('pairmane.seen'))markSeen();}catch(e){}}
   runFixed();refresh();
 }
@@ -454,7 +588,7 @@ function byDateDesc(a,b){return a.date<b.date?1:a.date>b.date?-1:0;}
 
 /* ---------- views ---------- */
 var view='home',hMonth=ym(today()),rMonth=ym(today()),hq='';
-var TABS=[['home','ホーム','home'],['report','レポート','chart'],['history','履歴','clock'],['settings','設定','gear']];
+var TABS=[['home','ホーム','home'],['shop','買い物','cart'],['report','レポート','chart'],['history','履歴','clock'],['settings','設定','gear']];
 
 function render(){
   var h='';
@@ -462,7 +596,7 @@ function render(){
     document.getElementById('app').innerHTML=vGate();
     document.getElementById('tabs').innerHTML='';document.querySelector('.tabs').hidden=true;document.getElementById('fabwrap').innerHTML='';return;
   }
-  if(view==='home')h=vHome();else if(view==='report')h=vReport();else if(view==='history')h=vHistory();else h=vSettings();
+  if(view==='home')h=vHome();else if(view==='shop')h=vShop();else if(view==='report')h=vReport();else if(view==='history')h=vHistory();else h=vSettings();
   document.getElementById('app').innerHTML=h;
   document.querySelector('.tabs').hidden=false;
   document.getElementById('tabs').innerHTML=TABS.map(function(t){
@@ -558,13 +692,15 @@ function vHistory(){
   var sl=S.settlements.slice().sort(byDateDesc);
   return notice()+'<div class="row between"><h1 class="title">履歴</h1>'+monthNav(hMonth,'hm')+'</div>'+
   '<input id="hq" class="field" type="search" placeholder="メモ・カテゴリ・金額で検索" value="'+esc(hq)+'" aria-label="検索">'+
-  '<div class="sec" id="hlist">'+histList()+'</div>'+
+  (monthLoaded(hMonth)?'':loadBtn(hMonth,'通信量を減らすため、先月より前の記録は必要なときだけ読み込みます。下には未精算の分だけ表示しています'))+
+  '<div class="sec" id="hlist">'+histList()+'</div>'+(hq?'<div class="sub">検索の対象は、読み込み済みの月だけです</div>':'')+
   '<div class="sec"><h2 class="h2 sub">精算履歴</h2>'+(sl.length?sl.map(function(s){
     return '<div class="item" style="cursor:default"><div class="tile" style="--c:var(--pri)">'+svg('swap')+'</div><div class="grow"><div style="font-weight:700">'+esc(nm(s.from))+' → '+esc(nm(s.to))+'</div><div class="sub">'+mdw(s.date)+'</div></div><b class="num">'+yen(s.amount)+'</b></div>';
   }).join(''):'<div class="empty">まだ精算はありません</div>')+'</div>';
 }
 
 function vReport(){
+  if(!monthLoaded(rMonth))return notice()+'<div class="row between"><h1 class="title">レポート</h1>'+monthNav(rMonth,'rm')+'</div>'+loadBtn(rMonth,'通信量を減らすため、先月より前のデータは必要なときだけ読み込みます');
   var list=S.expenses.filter(function(e){return ym(e.date)===rMonth;});
   var total=0,bur={a:0,b:0},byCat={};
   list.forEach(function(e){var c=calc(e);total+=e.amount;bur.a+=c.a;bur.b+=c.b;byCat[e.cat]=(byCat[e.cat]||0)+e.amount;});
@@ -575,7 +711,8 @@ function vReport(){
   for(var i=5;i>=0;i--){var k=ymAdd(+p[0],+p[1],-i);months.push(k);vals.push(S.expenses.filter(function(e){return ym(e.date)===k;}).reduce(function(s,e){return s+e.amount;},0));}
   var bk=Object.keys(S.budgets||{}).filter(function(id){return S.budgets[id]>0;});
   var budCard=bk.length?'<div class="card sec"><h2 class="h2">予算</h2>'+bk.map(function(id){var c=cat(id),b=S.budgets[id],v=byCat[id]||0,pc=Math.min(100,Math.round(v/b*100)),over=v>b;return '<div><div class="row between" style="font-size:14px;font-weight:700"><span class="row" style="gap:6px"><span class="dot" style="--c:'+c.color+'"></span>'+esc(c.name)+'</span><span class="num">'+yen(v)+' / '+yen(b)+'</span></div><div class="meter" style="margin-top:6px"><i style="--c:'+(over?'var(--danger)':c.color)+';width:'+pc+'%"></i></div><div class="sub" style="text-align:right;font-size:12px;'+(over?'color:var(--danger)':'')+'">'+(over?yen(v-b)+' 超過':'残り '+yen(b-v))+'</div></div>';}).join('')+'</div>':'';
-  var mx=Math.max.apply(null,vals.concat([1])),avg=Math.round(vals.reduce(function(s,v){return s+v;},0)/6);
+  var okm=months.map(monthLoaded),nOk=okm.filter(Boolean).length,missing=months.filter(function(k){return !monthLoaded(k);});
+  var mx=Math.max.apply(null,vals.concat([1])),avg=Math.round(vals.reduce(function(s,v,i){return s+(okm[i]?v:0);},0)/Math.max(1,nOk));
   return notice()+'<div class="row between"><h1 class="title">レポート</h1>'+monthNav(rMonth,'rm')+'</div>'+
   '<div class="card" style="text-align:center"><div class="sub">今月の合計</div><div class="num" style="font-size:38px;font-weight:700;line-height:1.2">'+yen(total)+'</div><div class="sub">'+list.length+'件の支出</div></div>'+
   '<div class="two">'+['a','b'].map(function(w){return '<div class="card stat" style="padding:12px 14px"><div class="row sub" style="gap:8px">'+av(w,22)+esc(nm(w))+'(負担)</div><b class="num" style="font-size:22px">'+yen(bur[w])+'</b></div>';}).join('')+'</div>'+
@@ -584,8 +721,9 @@ function vReport(){
    '<div class="grow" style="display:flex;flex-direction:column;gap:12px;min-width:140px">'+rows.map(function(r){var pc=Math.round(r.v/total*100);return '<div><div class="row between" style="font-size:14px;font-weight:700"><span class="row" style="gap:6px"><span class="dot" style="--c:'+r.c.color+';border-radius:3px"></span>'+esc(r.c.name)+'</span><span class="num">'+yen(r.v)+'</span></div><div style="height:6px;border-radius:3px;background:var(--field);margin-top:6px"><div style="height:6px;border-radius:3px;width:'+pc+'%;background:'+r.c.color+'"></div></div><div class="sub" style="text-align:right;font-size:12px">'+pc+'%</div></div>';}).join('')+'</div></div>'
    :'<div class="empty">この月の記録はありません</div>')+'</div>'+
   budCard+'<div class="card sec"><div class="row between"><h2 class="h2">月別推移(過去6か月)</h2><span class="sub">月平均 '+yen(avg)+'</span></div>'+
-  '<div class="row" style="align-items:flex-end;justify-content:space-between;height:90px;padding:0 6px;gap:6px">'+vals.map(function(v,i){var hgt=v?Math.max(6,Math.round(v/mx*90)):4;return '<div class="bar" style="height:'+hgt+'px;'+(i<5?'opacity:.45;':'')+(v?'':'background:var(--line);opacity:1')+'" title="'+yen(v)+'"></div>';}).join('')+'</div>'+
-  '<div class="row" style="justify-content:space-between;padding:0 6px;gap:6px">'+months.map(function(k,i){return '<span class="sub" style="width:30px;text-align:center;font-size:12px;'+(i===5?'color:var(--soft-ink);font-weight:700':'')+'">'+(+k.split('-')[1])+'月</span>';}).join('')+'</div></div>';
+  '<div class="row" style="align-items:flex-end;justify-content:space-between;height:90px;padding:0 6px;gap:6px">'+vals.map(function(v,i){var hgt=v?Math.max(6,Math.round(v/mx*90)):4;return (okm[i]?'<div class="bar" style="height:'+hgt+'px;'+(i<5?'opacity:.45;':'')+(v?'':'background:var(--line);opacity:1')+'" title="'+yen(v)+'"></div>':'<div class="bar" style="height:36px;background:transparent;border:2px dashed var(--line)" title="未読み込み"></div>');}).join('')+'</div>'+
+  '<div class="row" style="justify-content:space-between;padding:0 6px;gap:6px">'+months.map(function(k,i){return '<span class="sub" style="width:30px;text-align:center;font-size:12px;'+(i===5?'color:var(--soft-ink);font-weight:700':'')+'">'+(+k.split('-')[1])+'月</span>';}).join('')+'</div>'+
+  (missing.length?'<button type="button" class="btn btn-soft" style="height:40px" data-act="load-6" data-ms="'+missing.join(',')+'">'+(missing.some(function(k){return EXLOADING[k];})?'読み込み中…':'過去6か月分を読み込む')+'</button>':'')+'</div>';
 }
 
 function getPref(k){try{return localStorage.getItem('pairmane.'+k)||'';}catch(e){return '';}}
@@ -598,7 +736,6 @@ function rowBtn(ic,label,act,sub){
   return '<button type="button" class="srow rowbtn" data-act="'+act+'"><span class="tile" style="--c:var(--pri);width:40px;height:40px;border-radius:12px">'+svg(ic)+'</span><span class="grow" style="font-weight:700">'+label+'</span><span class="sub">'+sub+'</span><span class="sub" style="width:16px">'+svg('right',2.2)+'</span></button>';
 }
 function vSettings(){
-  var json=JSON.stringify({members:S.members,ratioA:S.ratioA,expenses:S.expenses,settlements:S.settlements,fixed:S.fixed,cats:S.cats,budgets:S.budgets,notes:S.notes});
   var waiting=S.memberUids.length<2;
   var cu=auth.currentUser,linked=!!(cu&&!cu.isAnonymous);
   var acct=linked?
@@ -621,9 +758,10 @@ function vSettings(){
   '<div class="sec"><div class="row between"><h2 class="h2 sub">固定費</h2><button type="button" class="pill" data-act="fx-add">＋ 追加</button></div>'+(fixedRows||'<div class="empty">家賃や通信費など、毎月かかるものを登録すると、指定日にアプリを開いたとき自動で記録されます</div>')+'</div>'+
   '<div class="sec"><div class="card group">'+rowBtn('tag','カテゴリと予算','cats-open',(S.cats.length?'追加 '+S.cats.length+' ・ ':'')+Object.keys(S.budgets||{}).length+'件の予算')+rowBtn('note','機能追加・要望メモ','notes-open',S.notes.filter(function(n){return !n.done;}).length+'件')+rowBtn('help','使い方','help-open','')+'</div></div>'+
   '<div class="sec"><h2 class="h2 sub">見た目(この端末だけ)</h2><div class="card sec"><b>テーマ</b><div class="seg">'+[['light','ライト'],['dark','ダーク'],['','端末に合わせる']].map(function(x){return '<button type="button" data-act="theme" data-v="'+x[0]+'" aria-pressed="'+(getPref('theme')===x[0])+'">'+x[1]+'</button>';}).join('')+'</div><b>フォント</b><div class="seg">'+[['','ゆったり'],['clean','すっきり'],['calm','しっとり']].map(function(x){return '<button type="button" data-act="font" data-v="'+x[0]+'" aria-pressed="'+(getPref('font')===x[0])+'">'+x[1]+'</button>';}).join('')+'</div><div class="sub">例: 今日の食費は¥1,280でした。</div></div></div>'+
-  '<div class="sec"><h2 class="h2 sub">バックアップ</h2><div class="card sec"><div class="sub">データはクラウドに保存され、ふたりの端末で共有されます。念のため、下の文字列もコピーして保管できます</div>'+
-  '<textarea id="bk" class="field" aria-label="バックアップデータ">'+esc(json)+'</textarea>'+
-  '<div class="row" style="gap:10px"><button type="button" class="btn btn-soft" style="flex:1;height:44px" data-act="bk-copy">コピー</button><button type="button" class="btn btn-ghost" style="flex:1;height:44px" data-act="bk-restore">この内容で復元</button></div></div></div>'+
+  '<div class="sec"><h2 class="h2 sub">バックアップ</h2><div class="card sec"><div class="sub">データはクラウドに保存され、ふたりの端末で共有されます。念のため、全データを文字列にしてコピーして保管できます</div>'+
+  '<textarea id="bk" class="field" aria-label="バックアップデータ" placeholder="「バックアップを作る」を押すと、ここに全データが入ります。復元するときは、ここに貼り付けます">'+esc(bkText)+'</textarea>'+
+  (bkText?'':'<button type="button" class="btn btn-pri" style="height:44px" data-act="bk-load"'+(bkBusy?' disabled':'')+'>'+(bkBusy?'読み込み中…':'バックアップを作る(全データを読み込み)')+'</button>')+
+  '<div class="row" style="gap:10px"><button type="button" class="btn btn-soft" style="flex:1;height:44px" data-act="bk-copy"'+(bkText?'':' disabled')+'>コピー</button><button type="button" class="btn btn-ghost" style="flex:1;height:44px" data-act="bk-restore">この内容で復元</button></div></div></div>'+
   '<button type="button" class="btn btn-danger" data-act="wipe" id="wipe">支出データをすべて削除</button>';
 }
 
@@ -667,10 +805,21 @@ var HELP=[
  ['カテゴリと予算','設定画面の「カテゴリと予算」で、カテゴリの追加と、カテゴリごとの月の予算を設定できます。予算を超えそうなカテゴリは、ホームに表示されます。'],
  ['通知','パートナーが支出を追加すると、アプリを開いているときは画面上部に知らせが出ます。アプリを閉じている間の分は、次に開いたとき、ホームに「N件の支出を追加しました」と表示されます。スマホの通知(プッシュ通知)は、まだ使えません。'],
  ['機種変更・ログイン','設定画面の「引き継ぎ用アカウント」でメールアドレスとパスワードを登録しておくと、機種変更やアプリの入れ直しのあとも、起動画面の「ログイン」から同じ接続に戻れます。'],
+ ['買い物リスト','「買い物」タブで、買うものをふたりで共有できます。買ったら丸を押すと「買ったもの」に移り、日付が記録されます。2回以上買ったものは平均の間隔を計算し、そろそろ買う時期になると上に表示します。今日買ったものは「支出に記録」で、品名をメモに入れた状態で支出を追加できます。'],
  ['見た目','設定画面で、テーマ(ライト・ダーク)とフォント(ゆったり・すっきり・しっとり)を選べます。この設定は、その端末だけに保存されます。']
 ];
 function paintHelp(){
   showSheet('<div class="sheet" role="dialog" aria-label="使い方"><div class="sheet-in">'+sheetHead('使い方')+'<div class="card group help">'+HELP.map(function(x,i){return '<details'+(i===0?' open':'')+'><summary>'+x[0]+'<span style="color:var(--sub)">'+svg('right',2.2).replace('<svg','<svg width="16" height="16"')+'</span></summary><p>'+esc(x[1])+'</p></details>';}).join('')+'</div></div></div>');
+}
+
+var bkText='',bkBusy=false;
+function allDocs(n){return getDocs(ccol(n)).then(function(qs){return qs.docs.map(function(d){return Object.assign({id:d.id},d.data());});});}
+function makeBackup(){
+  bkBusy=true;render();
+  Promise.all(['expenses','settlements','shopping','shopStats'].map(allDocs)).then(function(r){
+    bkText=JSON.stringify({members:S.members,ratioA:S.ratioA,expenses:r[0],settlements:r[1],fixed:S.fixed,cats:S.cats,budgets:S.budgets,notes:S.notes,shopping:r[2],shopStats:r[3]});
+    toast('全データを読み込みました。コピーしてください');
+  },function(){toast('読み込めませんでした。通信状況を確認してください');}).then(function(){bkBusy=false;refresh();});
 }
 
 /* ---------- fixed cost sheet ---------- */
@@ -762,8 +911,10 @@ function saveForm(){
   if(kA+kB>amt){toast('個人負担が金額を超えています');return;}
   var ex=editing?S.expenses.filter(function(x){return x.id===editing;})[0]:null;
   var o={id:ex?ex.id:uid(),date:F.date||today(),amount:amt,payer:F.payer,cat:F.cat,memo:F.memo.trim(),method:F.method,ratioA:F.ratioA,amtA:F.method==='amount'?(Math.max(0,Math.min(amt,parseInt(F.amtA,10)||0))):0,kA:kA,kB:kB,pending:F.pending,reflect:F.pending?F.reflect:'',settled:ex?ex.settled:false,by:ex&&ex.by?ex.by:me(),at:ex&&ex.at?ex.at:Date.now()};
-  putDoc('expenses',o);
-  closeSheet();toast(ex?'更新しました':'追加しました');
+  var shopIds=F.shopIds||null;
+  putDoc('expenses',o);exPatch(o);
+  if(shopIds&&!ex)runOps(shopIds.map(function(id){return function(w){w.update(doc(ccol('shopping'),id),{expensed:true});};}));
+  closeSheet();toast(ex?'更新しました':(shopIds?'買い物を支出に記録しました':'追加しました'));
 }
 
 /* ---------- settle sheet ---------- */
@@ -784,7 +935,7 @@ function openSettle(){
 function settleOK(){
   var b=balance();if(b.net===0)return;
   var ops=[],st={id:uid(),date:today(),from:b.net>0?'b':'a',to:b.net>0?'a':'b',amount:Math.abs(b.net)};
-  S.expenses.forEach(function(e){if(active(e))ops.push(function(w){w.update(doc(ccol('expenses'),e.id),{settled:true});});});
+  S.expenses.forEach(function(e){if(active(e)){ops.push(function(w){w.update(doc(ccol('expenses'),e.id),{settled:true});});Object.keys(EXP.extra).forEach(function(m){EXP.extra[m].forEach(function(x){if(x.id===e.id)x.settled=true;});});}});
   ops.push(function(w){w.set(doc(ccol('settlements'),st.id),st);});
   runOps(ops);
   closeSheet();celebrate(st.amount);
@@ -850,7 +1001,7 @@ document.addEventListener('click',function(ev){
      if(m==='amount'&&F.method!=='amount'){var c=calc(fToE());F.amtA=c.a;}
      F.method=m;paintKeep();break;
    case 'del':
-     if(t.getAttribute('data-arm')){var did=editing;S.expenses=S.expenses.filter(function(x){return x.id!==did;});delDoc('expenses',did);closeSheet();render();toast('削除しました');}
+     if(t.getAttribute('data-arm')){var did=editing;S.expenses=S.expenses.filter(function(x){return x.id!==did;});delDoc('expenses',did);exRemove(did);closeSheet();render();toast('削除しました');}
      else{t.setAttribute('data-arm','1');t.textContent='もう一度押すと削除します';}
      break;
    case 'settle':openSettle();break;
@@ -886,6 +1037,15 @@ document.addEventListener('click',function(ev){
      else{t.setAttribute('data-arm','1');t.textContent='もう一度';}
      break;
    case 'help-open':paintHelp();break;
+   case 'sh-add':if(addShop(shName,shCat,shMemo)){shName='';shMemo='';render();var ni=document.getElementById('sh-name');if(ni)ni.focus();}break;
+   case 'sh-quick':var qs=SHOP.stats.filter(function(x){return x.id===t.getAttribute('data-k');})[0];if(qs&&addShop(qs.name,qs.cat,'')){toast('「'+qs.name+'」を追加しました');render();}break;
+   case 'sh-check':checkShop(t.getAttribute('data-id'));render();break;
+   case 'sh-uncheck':uncheckShop(t.getAttribute('data-id'));render();break;
+   case 'sh-del':var sid=t.getAttribute('data-id');SHOP.active=SHOP.active.filter(function(x){return x.id!==sid;});delDoc('shopping',sid);render();break;
+   case 'sh-expense':openShopExpense();break;
+   case 'load-month':loadMonths([t.getAttribute('data-m')]);break;
+   case 'load-6':loadMonths(t.getAttribute('data-ms').split(','));break;
+   case 'bk-load':makeBackup();break;
    case 'code-copy':copyText(S.inviteCode,document.getElementById('bk'));break;
    case 'bk-copy':copyText(document.getElementById('bk').value,document.getElementById('bk'));break;
    case 'bk-restore':
@@ -895,6 +1055,8 @@ document.addEventListener('click',function(ev){
        ops.push(function(w){var u={ratioA:o.ratioA==null?70:o.ratioA};u['members.a']=o.members.a;u['members.b']=o.members.b;u.cats=o.cats||[];u.budgets=o.budgets||{};w.update(cref(),u);});
        (o.expenses||[]).forEach(function(x){ops.push(function(w){w.set(doc(ccol('expenses'),x.id),x);});});
        (o.settlements||[]).forEach(function(x){ops.push(function(w){w.set(doc(ccol('settlements'),x.id),x);});});
+       (o.shopping||[]).forEach(function(x){ops.push(function(w){w.set(doc(ccol('shopping'),x.id),x);});});
+       (o.shopStats||[]).forEach(function(x){ops.push(function(w){w.set(doc(ccol('shopStats'),x.id),x);});});
        (o.notes||[]).forEach(function(x){ops.push(function(w){w.set(doc(ccol('notes'),x.id),x);});});
        (o.fixed||[]).forEach(function(x){ops.push(function(w){w.set(doc(ccol('fixedCosts'),x.id),x);});});
        runOps(ops).then(function(){toast('復元しました');});
@@ -902,10 +1064,14 @@ document.addEventListener('click',function(ev){
      break;
    case 'wipe':
      if(wipeArm){
-       var ops2=[];
-       S.expenses.forEach(function(x){ops2.push(function(w){w.delete(doc(ccol('expenses'),x.id));});});
-       S.settlements.forEach(function(x){ops2.push(function(w){w.delete(doc(ccol('settlements'),x.id));});});
-       wipeArm=0;runOps(ops2).then(function(){toast('削除しました');});
+       wipeArm=0;
+       Promise.all([allDocs('expenses'),allDocs('settlements')]).then(function(r){
+         var ops2=[];
+         r[0].forEach(function(x){ops2.push(function(w){w.delete(doc(ccol('expenses'),x.id));});});
+         r[1].forEach(function(x){ops2.push(function(w){w.delete(doc(ccol('settlements'),x.id));});});
+         EXP.extra={};EXL={};
+         return runOps(ops2);
+       }).then(function(){toast('削除しました');},function(){toast('削除できませんでした。通信状況を確認してください');});
      }else{wipeArm=1;t.textContent='もう一度押すと支出データをすべて削除します';setTimeout(function(){wipeArm=0;var w=document.getElementById('wipe');if(w)w.textContent='支出データをすべて削除';},4000);}
      break;
    case 'fx-add':openFixed(null);break;
@@ -946,6 +1112,8 @@ document.addEventListener('input',function(ev){
   else if(id==='fx-memo'){FX.memo=t.value;}
   else if(id==='fx-amount'){t.value=t.value.replace(/[^0-9]/g,'');FX.amount=t.value;}
   else if(id==='fx-day'){t.value=t.value.replace(/[^0-9]/g,'');FX.day=t.value;}
+  else if(id==='sh-name'){shName=t.value;}
+  else if(id==='sh-memo'){shMemo=t.value;}
   else if(id==='hq'){hq=t.value;document.getElementById('hlist').innerHTML=histList();}
   else if(id==='rt'){S.ratioA=+t.value;document.getElementById('rt-lab').textContent=S.ratioA+':'+(100-S.ratioA);}
 });
@@ -953,6 +1121,7 @@ document.addEventListener('change',function(ev){
   var t=ev.target;
   if(t.id==='photo-in'){handlePhoto(t.files&&t.files[0]);t.value='';}
   else if(t.id==='rt'){patchCouple({ratioA:+t.value});}
+  else if(t.id==='sh-cat'){shCat=t.value;}
   else if(t.id.indexOf('bd-')===0){
     var bid=t.id.slice(3),n2=parseInt(t.value.replace(/[^0-9]/g,''),10)||0,up2={};
     if(n2>0){S.budgets[bid]=n2;up2['budgets.'+bid]=n2;}else{delete S.budgets[bid];up2['budgets.'+bid]=deleteField();}
@@ -963,8 +1132,9 @@ document.addEventListener('change',function(ev){
     S.members[w].name=v;patchCouple(up);
   }
 });
+document.addEventListener('keydown',function(ev){if(ev.key==='Enter'&&!ev.isComposing&&ev.target&&(ev.target.id==='sh-name'||ev.target.id==='sh-memo')){ev.preventDefault();var b=document.querySelector('[data-act=sh-add]');if(b)b.click();}});
 document.addEventListener('focusout',function(){setTimeout(function(){if(dirty)refresh();},0);});
-document.addEventListener('visibilitychange',function(){if(!document.hidden){fixedRan=false;if(phase==='ready'){runFixed();refresh();}}});
+document.addEventListener('visibilitychange',function(){if(!document.hidden){fixedRan=false;if(phase==='ready'){if(CID&&baseYm()!==EXBASE){startSync(CID);return;}runFixed();refresh();}}});
 if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('./sw.js').catch(function(){});});}
 render();
 })();

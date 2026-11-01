@@ -24,5 +24,23 @@ await pg.click('[data-act=tab][data-v=settings]');await pg.click('[data-act=fx-a
 await pg.waitForSelector('text=毎月1日');ok(true,'fixed cost saved');
 await pg.click('[data-act=cats-open]');await pg.fill('#bd-food','500');await pg.press('#bd-food','Tab');await pg.click('.sheet [data-act=close]');
 await pg.click('[data-act=tab][data-v=home]');await pg.waitForSelector('text=今月の予算チェック');ok(true,'budget warning');
+// month loading: two months back is not loaded automatically
+await pg.click('[data-act=tab][data-v=history]');await pg.click('[data-act=hm][data-d="-1"]');await pg.click('[data-act=hm][data-d="-1"]');
+ok(await pg.isVisible('[data-act=load-month]'),'older month shows a load button');
+await pg.click('[data-act=load-month]');await pg.waitForSelector('[data-act=load-month]',{state:'detached'});ok(true,'older month loaded');
+// shopping list
+await pg.click('[data-act=tab][data-v=shop]');await pg.fill('#sh-name','お米');await pg.click('[data-act=sh-add]');
+await pg.waitForSelector('.item >> text=お米');ok(true,'shopping item added');
+const cid=await pg.evaluate(()=>Object.keys(window.__store).find(k=>/^couples\/[^/]+$/.test(k)).split('/')[1]);
+const d=n=>{const t=new Date(Date.now()-n*864e5);return t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0');};
+await pg.evaluate(([cid,a,b])=>{window.__store['couples/'+cid+'/shopStats/kx']={id:'kx',key:'しょうゆ',name:'しょうゆ',cat:'food',dates:[a,b],count:2};},[cid,d(40),d(20)]);
+await pg.fill('#sh-name','卵');await pg.click('[data-act=sh-add]');
+await pg.waitForSelector('text=そろそろ買う時期');ok(true,'purchase cycle shows "そろそろ買う時期" (avg 20 days, 20 days since)');
+await pg.click('.item:has-text("お米") [data-act=sh-check]');
+await pg.waitForSelector('[data-act=sh-expense]');await pg.click('[data-act=sh-expense]');
+ok((await pg.inputValue('#f-memo'))==='お米','expense sheet prefilled with the bought item');
+await pg.fill('#f-amount','2000');await pg.click('[data-act=save]');await pg.waitForSelector('text=買い物を支出に記録しました');
+const marked=await pg.evaluate(()=>Object.entries(window.__store).some(([k,v])=>k.includes('/shopping/')&&v.name==='お米'&&v.expensed===true));
+ok(marked,'bought item marked as recorded');
 ok(errs.length===0,'no page errors '+JSON.stringify(errs));
 await b.close();srv.close();

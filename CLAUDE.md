@@ -22,7 +22,7 @@
 ## 動作確認
 
 ```sh
-node tests/smoke.mjs   # 疑似Firebase（tests/stub-*.js）で、作成→追加→精算→固定費→予算を確認
+node tests/smoke.mjs   # 疑似Firebase（tests/stub-*.js）で、作成→追加→精算→固定費→予算→過去月の読み込み→買い物リストを確認
 ```
 
 環境によっては `PLAYWRIGHT=<playwrightのindex.mjsのパス>` と `CHROMIUM=<ブラウザのパス>` を指定する。
