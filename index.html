@@ -279,9 +279,9 @@ function runOps(ops){ /* chunked batches, 400 writes each */
 function rid(n,al){var a=new Uint8Array(n),o='';crypto.getRandomValues(a);for(var i=0;i<n;i++)o+=al[a[i]%al.length];return o;}
 function cacheCid(c){try{if(c)localStorage.setItem('pairmane.cid',c);else localStorage.removeItem('pairmane.cid');}catch(e){}}
 /* shopping list: items not yet bought + bought in the last 30 days are live; purchase dates per item live in shopStats */
-var SHOP={active:[],recent:[],stats:[]},shName='',shMemo='',shCat='food';
+var SHOP={active:[],recent:[],older:[],stats:[]},shName='',shMemo='',shCat='food',shOldest='',shLoading=false,shBoughtOpen=false;
 function startShopSync(first){
-  SHOP={active:[],recent:[],stats:[]};S.shopBlocked=false;
+  SHOP={active:[],recent:[],older:[],stats:[]};S.shopBlocked=false;shOldest=baseYm();
   var blocked=function(e){if(e&&e.code==='permission-denied'){S.shopBlocked=true;if(phase==='ready')refresh();}};
   var docs=function(snap){return snap.docs.map(function(d){return Object.assign({id:d.id},d.data());});};
   unsubs.push(onSnapshot(query(ccol('shopping'),where('done','==',false)),function(snap){
@@ -295,7 +295,7 @@ function startShopSync(first){
     }
     first.shop=true;if(phase==='ready')refresh();
   },blocked));
-  unsubs.push(onSnapshot(query(ccol('shopping'),where('doneAt','>=',Date.now()-30*864e5)),function(snap){SHOP.recent=docs(snap);if(phase==='ready')refresh();},blocked));
+  unsubs.push(onSnapshot(query(ccol('shopping'),where('doneDate','>=',baseYm()+'-01')),function(snap){SHOP.recent=docs(snap);if(phase==='ready')refresh();},blocked));
   unsubs.push(onSnapshot(ccol('shopStats'),function(snap){SHOP.stats=docs(snap);if(phase==='ready')refresh();},blocked));
 }
 function normKey(n){return String(n).normalize('NFKC').trim().toLowerCase().replace(/\s+/g,'');}
@@ -309,6 +309,13 @@ function cycleOf(st){
   if(d.length<2)return last?{last:last,el:el,avg:0,due:false}:null;
   var avg=Math.round(daysBetween(d[0],last)/(d.length-1));
   return {last:last,el:el,avg:avg,due:avg>0&&el>=Math.max(1,Math.round(avg*0.85))};
+}
+function loadOlderShop(){
+  var k=shiftMonth(shOldest,-1);shLoading=true;render();
+  getDocs(query(ccol('shopping'),where('doneDate','>=',k+'-01'),where('doneDate','<',shiftMonth(k,1)+'-01'))).then(function(qs){
+    SHOP.older=SHOP.older.concat(qs.docs.map(function(d){return Object.assign({id:d.id},d.data());}).filter(function(x){return x.done;}));shOldest=k;
+    if(!qs.docs.length)toast(ymLabel(k)+'に買ったものはありません');
+  },function(){toast('読み込めませんでした。通信状況を確認してください');}).then(function(){shLoading=false;refresh();});
 }
 function onList(name){var k=normKey(name);return SHOP.active.some(function(x){return x.key===k;});}
 function addShop(name,c,memo){
@@ -327,14 +334,14 @@ function checkShop(id){
   runOps([function(w){w.update(doc(ccol('shopping'),id),upd);},function(w){w.set(doc(ccol('shopStats'),ns.id),ns);}]);
 }
 function uncheckShop(id){
-  var it=SHOP.recent.filter(function(x){return x.id===id;})[0];if(!it)return;
+  var it=SHOP.recent.concat(SHOP.older).filter(function(x){return x.id===id;})[0];if(!it)return;
   var st=statOf(it.name),ops=[function(w){w.update(doc(ccol('shopping'),id),{done:false,doneAt:deleteField(),doneBy:deleteField(),doneDate:deleteField(),expensed:deleteField()});}];
   if(st){
     var others=SHOP.recent.some(function(x){return x.id!==id&&x.key===it.key&&x.doneDate===it.doneDate;});
     var dates=others?st.dates:(st.dates||[]).filter(function(x){return x!==it.doneDate;});
     ops.push(function(w){w.set(doc(ccol('shopStats'),st.id),Object.assign({},st,{dates:dates,count:Math.max(0,(st.count||1)-1)}));});
   }
-  SHOP.recent=SHOP.recent.filter(function(x){return x.id!==id;});SHOP.active.push(Object.assign({},it,{done:false}));
+  SHOP.recent=SHOP.recent.filter(function(x){return x.id!==id;});SHOP.older=SHOP.older.filter(function(x){return x.id!==id;});SHOP.active.push(Object.assign({},it,{done:false}));
   runOps(ops);
 }
 function openShopExpense(){
@@ -352,7 +359,7 @@ function vShop(){
   var groups=[];act.forEach(function(x){var g=groups[groups.length-1];if(!g||g.cat!==x.cat){g={cat:x.cat,items:[]};groups.push(g);}g.items.push(x);});
   var due=SHOP.stats.map(function(st){return {st:st,cy:cycleOf(st)};}).filter(function(x){return x.cy&&x.cy.due&&!onList(x.st.name);}).sort(function(a,b){return (b.cy.el/b.cy.avg)-(a.cy.el/a.cy.avg);});
   var freq=SHOP.stats.filter(function(st){return !onList(st.name)&&!due.some(function(d){return d.st.id===st.id;});}).sort(function(a,b){return (b.count||0)-(a.count||0);}).slice(0,12);
-  var rec=SHOP.recent.slice().sort(function(a,b){return (b.doneAt||0)-(a.doneAt||0);});
+  var rec=SHOP.recent.concat(SHOP.older).filter(function(x){return x.done;}).sort(function(a,b){return (b.doneAt||0)-(a.doneAt||0);});
   var todayN=shopTodayUnrecorded();
   var circle=function(on,act,id,label){return '<button type="button" class="swatch" style="--c:'+(on?'var(--pri)':'var(--card)')+';width:30px;height:30px;color:#fff;display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 0 0 2px '+(on?'var(--pri)':'var(--line)')+'" data-act="'+act+'" data-id="'+id+'" aria-label="'+label+'">'+(on?svg('check',3).replace('<svg','<svg width="16" height="16"'):'')+'</button>';};
   var cyText=function(name){var cy=cycleOf(statOf(name));if(!cy)return '';return '前回 '+md(cy.last)+(cy.avg?' ・ 平均'+cy.avg+'日ごと':'');};
@@ -367,7 +374,7 @@ function vShop(){
   (todayN.length?'<div class="notice" style="flex-wrap:wrap"><span>今日買った'+todayN.length+'品を、支出として記録できます</span><button type="button" data-act="sh-expense">支出に記録</button></div>':'')+
   '<div class="sec"><h2 class="h2">買うもの</h2>'+(groups.length?groups.map(function(g){var c=cat(g.cat);return '<div class="sec" style="gap:8px"><div class="row sub" style="gap:6px;font-weight:700"><span class="dot" style="--c:'+c.color+'"></span>'+esc(c.name)+'</div>'+g.items.map(row).join('')+'</div>';}).join(''):'<div class="empty">買うものはありません。上の入力欄から追加できます</div>')+'</div>'+
   (freq.length?'<div class="sec"><h2 class="h2 sub">よく買うもの</h2><div class="row" style="flex-wrap:wrap;gap:8px">'+freq.map(function(st){return chip(st,'');}).join('')+'</div></div>':'')+
-  (rec.length?'<details class="sec"'+(todayN.length?' open':'')+'><summary class="h2 sub">買ったもの(30日間) '+rec.length+'件</summary><div class="sec" style="margin-top:10px">'+rec.map(function(x){return '<div class="item" style="cursor:default;opacity:.75">'+circle(true,'sh-uncheck',x.id,'買っていないに戻す')+'<div class="grow"><div style="font-weight:700;text-decoration:line-through">'+esc(x.name)+'</div><div class="sub" style="font-size:12px">'+md(x.doneDate||today())+' ・ '+esc(nm(x.doneBy||'a'))+'が購入'+(x.expensed?' ・ 支出に記録済み':'')+'</div></div></div>';}).join('')+'</div></details>':'');
+  '<details class="sec" id="sh-bought"'+(todayN.length||shBoughtOpen||shOldest!==baseYm()?' open':'')+'><summary class="h2 sub">買ったもの('+ymLabel(shOldest).replace(/^\d+年/,'')+'から) '+rec.length+'件</summary><div class="sec" style="margin-top:10px">'+(rec.length?'':'<div class="empty">この期間に買ったものはありません</div>')+rec.map(function(x){return '<div class="item" style="cursor:default;opacity:.75">'+circle(true,'sh-uncheck',x.id,'買っていないに戻す')+'<div class="grow"><div style="font-weight:700;text-decoration:line-through">'+esc(x.name)+'</div><div class="sub" style="font-size:12px">'+md(x.doneDate||today())+' ・ '+esc(nm(x.doneBy||'a'))+'が購入'+(x.expensed?' ・ 支出に記録済み':'')+'</div></div></div>';}).join('')+'<button type="button" class="btn btn-soft" style="height:40px" data-act="sh-older"'+(shLoading?' disabled':'')+'>'+(shLoading?'読み込み中…':ymLabel(shiftMonth(shOldest,-1))+'に買ったものを読み込む')+'</button></div></details>';
 }
 
 /* expenses: this month + last month and every unsettled one are live; older months load on demand */
@@ -699,21 +706,30 @@ function vHistory(){
   }).join(''):'<div class="empty">まだ精算はありません</div>')+'</div>';
 }
 
+function repEx(){try{return JSON.parse(localStorage.getItem('pairmane.repEx')||'{}')||{};}catch(e){return {};}}
+function setRepEx(o){try{localStorage.setItem('pairmane.repEx',JSON.stringify(o));}catch(e){}REPX=o;}
+var REPX=null;
 function vReport(){
+  var ex=REPX||(REPX=repEx());
   if(!monthLoaded(rMonth))return notice()+'<div class="row between"><h1 class="title">レポート</h1>'+monthNav(rMonth,'rm')+'</div>'+loadBtn(rMonth,'通信量を減らすため、先月より前のデータは必要なときだけ読み込みます');
-  var list=S.expenses.filter(function(e){return ym(e.date)===rMonth;});
+  var all=S.expenses.filter(function(e){return ym(e.date)===rMonth;});
+  var list=all.filter(function(e){return !ex[e.cat];});
+  var catIds={};all.forEach(function(e){catIds[e.cat]=1;});Object.keys(ex).forEach(function(k){catIds[k]=1;});
+  var exN=Object.keys(ex).filter(function(k){return ex[k];}).length;
+  var filt='<div class="sec" style="gap:8px"><div class="row between"><span class="sub">集計するカテゴリ'+(exN?'(<b style="color:var(--warn-ink)">'+exN+'件を除外中</b>)':'')+'</span>'+(exN?'<button type="button" class="pill" style="height:32px" data-act="rep-all">すべて含める</button>':'')+'</div><div class="row" style="flex-wrap:wrap;gap:8px">'+
+   allCats().filter(function(c){return catIds[c.id];}).map(function(c){var on=!ex[c.id];return '<button type="button" class="pill" style="height:34px;display:inline-flex;align-items:center;gap:6px;'+(on?'':'opacity:.55;text-decoration:line-through')+'" data-act="rep-cat" data-id="'+c.id+'" aria-pressed="'+on+'"><span class="dot" style="--c:'+c.color+'"></span>'+esc(c.name)+'</button>';}).join('')+'</div></div>';
   var total=0,bur={a:0,b:0},byCat={};
   list.forEach(function(e){var c=calc(e);total+=e.amount;bur.a+=c.a;bur.b+=c.b;byCat[e.cat]=(byCat[e.cat]||0)+e.amount;});
   var rows=Object.keys(byCat).map(function(k){return {c:cat(k),v:byCat[k]};}).sort(function(x,y){return y.v-x.v;});
   var R=52,C=2*Math.PI*R,cum=0,arcs='';
   rows.forEach(function(r){var len=C*r.v/total;arcs+='<circle cx="70" cy="70" r="'+R+'" fill="none" stroke="'+r.c.color+'" stroke-width="22" stroke-dasharray="'+len.toFixed(1)+' '+(C-len).toFixed(1)+'" stroke-dashoffset="'+(-cum).toFixed(1)+'"/>';cum+=len;});
   var p=rMonth.split('-'),months=[],vals=[];
-  for(var i=5;i>=0;i--){var k=ymAdd(+p[0],+p[1],-i);months.push(k);vals.push(S.expenses.filter(function(e){return ym(e.date)===k;}).reduce(function(s,e){return s+e.amount;},0));}
+  for(var i=5;i>=0;i--){var k=ymAdd(+p[0],+p[1],-i);months.push(k);vals.push(S.expenses.filter(function(e){return ym(e.date)===k&&!ex[e.cat];}).reduce(function(s,e){return s+e.amount;},0));}
   var bk=Object.keys(S.budgets||{}).filter(function(id){return S.budgets[id]>0;});
   var budCard=bk.length?'<div class="card sec"><h2 class="h2">予算</h2>'+bk.map(function(id){var c=cat(id),b=S.budgets[id],v=byCat[id]||0,pc=Math.min(100,Math.round(v/b*100)),over=v>b;return '<div><div class="row between" style="font-size:14px;font-weight:700"><span class="row" style="gap:6px"><span class="dot" style="--c:'+c.color+'"></span>'+esc(c.name)+'</span><span class="num">'+yen(v)+' / '+yen(b)+'</span></div><div class="meter" style="margin-top:6px"><i style="--c:'+(over?'var(--danger)':c.color)+';width:'+pc+'%"></i></div><div class="sub" style="text-align:right;font-size:12px;'+(over?'color:var(--danger)':'')+'">'+(over?yen(v-b)+' 超過':'残り '+yen(b-v))+'</div></div>';}).join('')+'</div>':'';
   var okm=months.map(monthLoaded),nOk=okm.filter(Boolean).length,missing=months.filter(function(k){return !monthLoaded(k);});
   var mx=Math.max.apply(null,vals.concat([1])),avg=Math.round(vals.reduce(function(s,v,i){return s+(okm[i]?v:0);},0)/Math.max(1,nOk));
-  return notice()+'<div class="row between"><h1 class="title">レポート</h1>'+monthNav(rMonth,'rm')+'</div>'+
+  return notice()+'<div class="row between"><h1 class="title">レポート</h1>'+monthNav(rMonth,'rm')+'</div>'+(Object.keys(catIds).length?filt:'')+
   '<div class="card" style="text-align:center"><div class="sub">今月の合計</div><div class="num" style="font-size:38px;font-weight:700;line-height:1.2">'+yen(total)+'</div><div class="sub">'+list.length+'件の支出</div></div>'+
   '<div class="two">'+['a','b'].map(function(w){return '<div class="card stat" style="padding:12px 14px"><div class="row sub" style="gap:8px">'+av(w,22)+esc(nm(w))+'(負担)</div><b class="num" style="font-size:22px">'+yen(bur[w])+'</b></div>';}).join('')+'</div>'+
   '<div class="card sec"><h2 class="h2">支出の内訳</h2>'+(rows.length?
@@ -805,6 +821,7 @@ var HELP=[
  ['カテゴリと予算','設定画面の「カテゴリと予算」で、カテゴリの追加と、カテゴリごとの月の予算を設定できます。予算を超えそうなカテゴリは、ホームに表示されます。'],
  ['通知','パートナーが支出を追加すると、アプリを開いているときは画面上部に知らせが出ます。アプリを閉じている間の分は、次に開いたとき、ホームに「N件の支出を追加しました」と表示されます。スマホの通知(プッシュ通知)は、まだ使えません。'],
  ['機種変更・ログイン','設定画面の「引き継ぎ用アカウント」でメールアドレスとパスワードを登録しておくと、機種変更やアプリの入れ直しのあとも、起動画面の「ログイン」から同じ接続に戻れます。'],
+ ['レポートの絞り込み','レポートの上に並ぶカテゴリを押すと、そのカテゴリを集計から外せます。引っ越しの初期費用のような一時的な大きな支出は、専用のカテゴリ(例: 引っ越し)を作って外すと、普段の傾向が見やすくなります。この設定は端末ごとに保存されます。精算の金額には影響しません。'],
  ['買い物リスト','「買い物」タブで、買うものをふたりで共有できます。買ったら丸を押すと「買ったもの」に移り、日付が記録されます。2回以上買ったものは平均の間隔を計算し、そろそろ買う時期になると上に表示します。今日買ったものは「支出に記録」で、品名をメモに入れた状態で支出を追加できます。'],
  ['見た目','設定画面で、テーマ(ライト・ダーク)とフォント(ゆったり・すっきり・しっとり)を選べます。この設定は、その端末だけに保存されます。']
 ];
@@ -882,7 +899,8 @@ function sheetHTML(){
   '<div class="row between"><button type="button" class="btn btn-ghost" style="height:40px;border:0;color:var(--pri)" data-act="close">キャンセル</button><h2 class="h2" style="font-size:17px">'+(editing?'支出を編集':'支出を追加')+'</h2><button type="button" class="btn btn-pri" style="height:40px" data-act="save">保存</button></div>'+
   '<div class="card amtbox"><div class="row between"><label class="sub" for="f-amount">金額</label><input id="f-date" type="date" class="field" style="width:auto;height:34px;font-size:13px" value="'+F.date+'" aria-label="日付"></div><div class="inp"><span style="font-size:28px;font-weight:700">¥</span><input id="f-amount" type="text" inputmode="numeric" placeholder="0" value="'+esc(F.amount)+'" autocomplete="off"></div></div>'+
   '<div class="sec"><h2 class="h2">誰が払った?</h2><div class="payers">'+['a','b'].map(function(w){return '<button type="button" class="payer" style="--c:var(--'+w+')" data-act="payer" data-w="'+w+'" aria-pressed="'+(F.payer===w)+'">'+av(w,28)+esc(nm(w))+'</button>';}).join('')+'</div></div>'+
-  '<div class="sec"><h2 class="h2">カテゴリ</h2><div class="cats">'+allCats().map(function(k){return '<button type="button" class="cat" style="--c:'+k.color+'" data-act="cat" data-id="'+k.id+'" aria-pressed="'+(F.cat===k.id)+'"><span class="tile" style="--c:'+k.color+'">'+svg(k.icon)+'</span>'+esc(k.name)+'</button>';}).join('')+'</div></div>'+
+  '<div class="sec"><h2 class="h2">カテゴリ</h2><div class="cats">'+allCats().map(function(k){return '<button type="button" class="cat" style="--c:'+k.color+'" data-act="cat" data-id="'+k.id+'" aria-pressed="'+(F.cat===k.id)+'"><span class="tile" style="--c:'+k.color+'">'+svg(k.icon)+'</span>'+esc(k.name)+'</button>';}).join('')+
+   '<button type="button" class="cat" data-act="cat-new" aria-expanded="'+!!F.newCat+'"><span class="tile" style="--c:var(--pri);border:2px dashed var(--line);background:transparent">'+svg('plus',2.4)+'</span>追加</button></div>'+(F.newCat?newCatForm():'')+'</div>'+
   '<div class="card result" id="f-result">'+resultHTML()+'</div>'+
   '<div class="card opts">'+
    '<div class="opt"><label class="sub" for="f-memo">メモ</label><input id="f-memo" class="field" placeholder="スーパーで買い物" value="'+esc(F.memo)+'"></div>'+
@@ -892,6 +910,13 @@ function sheetHTML(){
   '</div>'+
   (editing?'<button type="button" class="btn btn-danger" data-act="del" id="del">この支出を削除</button>':'')+
   '</div></div>';
+}
+var NC2={name:'',icon:'heart',color:'#d6336c'};
+function newCatForm(){
+  return '<div class="card sec" style="gap:10px"><b>カテゴリを追加</b><input id="nc2-name" class="field" maxlength="8" placeholder="カテゴリ名(例: 引っ越し)" value="'+esc(NC2.name)+'" aria-label="カテゴリ名" autocomplete="off">'+
+   '<div class="row" style="flex-wrap:wrap;gap:8px">'+ICONS.map(function(i){return '<button type="button" class="iconpick" data-act="nc2-icon" data-i="'+i+'" aria-pressed="'+(NC2.icon===i)+'" aria-label="アイコン">'+svg(i)+'</button>';}).join('')+'</div>'+
+   '<div class="row" style="flex-wrap:wrap;gap:10px">'+COLORS.map(function(c){return '<button type="button" class="swatch" style="--c:'+c+'" data-act="nc2-color" data-c="'+c+'" aria-pressed="'+(NC2.color===c)+'" aria-label="色"></button>';}).join('')+'</div>'+
+   '<div class="row" style="gap:10px"><button type="button" class="btn btn-pri grow" style="height:44px" data-act="nc2-add">追加して選ぶ</button><button type="button" class="btn btn-ghost" style="height:44px" data-act="cat-new">やめる</button></div></div>';
 }
 function openSheet(e){
   if(e){editing=e.id;F={amount:String(e.amount),date:e.date,payer:e.payer,cat:e.cat,memo:e.memo||'',method:e.method,ratioA:e.ratioA,amtA:e.amtA||0,kA:e.kA?String(e.kA):'',kB:e.kB?String(e.kB):'',pending:!!e.pending,reflect:e.reflect||nextFirst(e.date),personal:!!(e.kA||e.kB)};}
@@ -1037,12 +1062,24 @@ document.addEventListener('click',function(ev){
      else{t.setAttribute('data-arm','1');t.textContent='もう一度';}
      break;
    case 'help-open':paintHelp();break;
+   case 'cat-new':F.newCat=!F.newCat;paintKeep();if(F.newCat){var nn=document.getElementById('nc2-name');if(nn)nn.focus();}break;
+   case 'nc2-icon':NC2.icon=t.getAttribute('data-i');paintKeep();break;
+   case 'nc2-color':NC2.color=t.getAttribute('data-c');paintKeep();break;
+   case 'nc2-add':
+     var ncName=NC2.name.trim();if(!ncName){toast('カテゴリ名を入力してください');break;}
+     if(allCats().some(function(c){return c.name===ncName;})){toast('「'+ncName+'」はもうあります');break;}
+     var nc={id:'c'+uid(),name:ncName,icon:NC2.icon,color:NC2.color};
+     S.cats=S.cats.concat([nc]);patchCouple({cats:S.cats});
+     F.cat=nc.id;F.newCat=false;NC2={name:'',icon:'heart',color:'#d6336c'};paintKeep();toast('「'+ncName+'」を追加しました');break;
+   case 'rep-cat':var rc=t.getAttribute('data-id'),rx=repEx();if(rx[rc])delete rx[rc];else rx[rc]=1;setRepEx(rx);render();break;
+   case 'rep-all':setRepEx({});render();break;
    case 'sh-add':if(addShop(shName,shCat,shMemo)){shName='';shMemo='';render();var ni=document.getElementById('sh-name');if(ni)ni.focus();}break;
    case 'sh-quick':var qs=SHOP.stats.filter(function(x){return x.id===t.getAttribute('data-k');})[0];if(qs&&addShop(qs.name,qs.cat,'')){toast('「'+qs.name+'」を追加しました');render();}break;
    case 'sh-check':checkShop(t.getAttribute('data-id'));render();break;
    case 'sh-uncheck':uncheckShop(t.getAttribute('data-id'));render();break;
    case 'sh-del':var sid=t.getAttribute('data-id');SHOP.active=SHOP.active.filter(function(x){return x.id!==sid;});delDoc('shopping',sid);render();break;
    case 'sh-expense':openShopExpense();break;
+   case 'sh-older':loadOlderShop();break;
    case 'load-month':loadMonths([t.getAttribute('data-m')]);break;
    case 'load-6':loadMonths(t.getAttribute('data-ms').split(','));break;
    case 'bk-load':makeBackup();break;
@@ -1112,6 +1149,7 @@ document.addEventListener('input',function(ev){
   else if(id==='fx-memo'){FX.memo=t.value;}
   else if(id==='fx-amount'){t.value=t.value.replace(/[^0-9]/g,'');FX.amount=t.value;}
   else if(id==='fx-day'){t.value=t.value.replace(/[^0-9]/g,'');FX.day=t.value;}
+  else if(id==='nc2-name'){NC2.name=t.value;}
   else if(id==='sh-name'){shName=t.value;}
   else if(id==='sh-memo'){shMemo=t.value;}
   else if(id==='hq'){hq=t.value;document.getElementById('hlist').innerHTML=histList();}
@@ -1133,6 +1171,7 @@ document.addEventListener('change',function(ev){
   }
 });
 document.addEventListener('keydown',function(ev){if(ev.key==='Enter'&&!ev.isComposing&&ev.target&&(ev.target.id==='sh-name'||ev.target.id==='sh-memo')){ev.preventDefault();var b=document.querySelector('[data-act=sh-add]');if(b)b.click();}});
+document.addEventListener('toggle',function(ev){if(ev.target&&ev.target.id==='sh-bought')shBoughtOpen=ev.target.open;},true);
 document.addEventListener('focusout',function(){setTimeout(function(){if(dirty)refresh();},0);});
 document.addEventListener('visibilitychange',function(){if(!document.hidden){fixedRan=false;if(phase==='ready'){if(CID&&baseYm()!==EXBASE){startSync(CID);return;}runFixed();refresh();}}});
 if('serviceWorker' in navigator){window.addEventListener('load',function(){navigator.serviceWorker.register('./sw.js').catch(function(){});});}

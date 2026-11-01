@@ -42,5 +42,22 @@ ok((await pg.inputValue('#f-memo'))==='お米','expense sheet prefilled with the
 await pg.fill('#f-amount','2000');await pg.click('[data-act=save]');await pg.waitForSelector('text=買い物を支出に記録しました');
 const marked=await pg.evaluate(()=>Object.entries(window.__store).some(([k,v])=>k.includes('/shopping/')&&v.name==='お米'&&v.expensed===true));
 ok(marked,'bought item marked as recorded');
+// add a category from the expense sheet, then exclude it in the report
+await pg.click('[data-act=tab][data-v=home]');await pg.click('[data-act=add]');
+await pg.click('[data-act=cat-new]');await pg.fill('#nc2-name','引っ越し');await pg.click('[data-act=nc2-add]');
+ok(await pg.isVisible('.cat[aria-pressed=true]:has-text("引っ越し")'),'new category added from the expense sheet and selected');
+await pg.fill('#f-amount','330000');await pg.click('[data-act=method][data-m=all_a]');await pg.click('[data-act=save]');await pg.waitForSelector('text=追加しました');
+await pg.click('[data-act=tab][data-v=report]');
+const tot=async()=>(await pg.textContent('.card .num')).trim();
+const before=await tot();
+await pg.click('[data-act=rep-cat]:has-text("引っ越し")');
+const after=await tot();
+ok(before!==after&&!after.includes('331'),'report excludes the category ('+before+' → '+after+')');
+await pg.click('[data-act=rep-all]');ok((await tot())===before,'report includes all again');
+// shopping: older purchases load button
+await pg.click('[data-act=tab][data-v=shop]');
+await pg.evaluate(()=>{const d=document.getElementById('sh-bought');if(d&&!d.open)d.open=true;});
+ok(await pg.isVisible('[data-act=sh-older]'),'shopping shows a button to load older purchases');
+await pg.click('[data-act=sh-older]');await pg.waitForSelector('[data-act=sh-older]:not([disabled])');ok(true,'older purchases loaded');
 ok(errs.length===0,'no page errors '+JSON.stringify(errs));
 await b.close();srv.close();
