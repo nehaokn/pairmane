@@ -69,5 +69,22 @@ const clip=await pg.evaluate(async()=>{try{return await navigator.clipboard.read
 const got=clip||nt||'';
 ok(got.includes('【ペアマネ 要望メモ】')&&got.includes('1. 買い物リストに並び替えが欲しい')&&got.includes('2. レポートを年単位で見たい / 2行目'),'notes copied as numbered text');
 await pg.click('.sheet [data-act=close]');
+// report by person (burden), data sheet, emoji category
+await pg.click('[data-act=tab][data-v=report]');
+await pg.click('[data-act=rep-p][data-v=a]');
+const pa=(await pg.textContent('.card .num')).trim();
+await pg.click('[data-act=rep-p][data-v=b]');
+const pb=(await pg.textContent('.card .num')).trim();
+await pg.click('[data-act=rep-p][data-v=""]');
+const pall=(await pg.textContent('.card .num')).trim();
+const n=x=>+x.replace(/[^0-9]/g,'');
+ok(n(pa)+n(pb)===n(pall),'report by person: '+pa+' + '+pb+' = '+pall);
+await pg.click('[data-act=tab][data-v=settings]');
+ok(!(await pg.isVisible('#wipe')),'delete button is not on the settings page');
+await pg.click('[data-act=data-open]');ok(await pg.isVisible('#wipe'),'delete button is inside データの管理');await pg.click('.sheet [data-act=close]');
+await pg.click('[data-act=tab][data-v=home]');await pg.click('[data-act=add]');await pg.click('[data-act=cat-new]');
+await pg.fill('#nc2-name','ペット');await pg.fill('#nc2-emoji','🐶');await pg.click('[data-act=nc2-add]');
+ok(await pg.isVisible('.cat[aria-pressed=true] .emo'),'emoji category created and selected');
+await pg.click('.sheet [data-act=close]');
 ok(errs.length===0,'no page errors '+JSON.stringify(errs));
 await b.close();srv.close();
