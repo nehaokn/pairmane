@@ -801,10 +801,18 @@ function paintCats(){
    COLORS.map(function(c){return '<button type="button" class="swatch" style="--c:'+c+'" data-act="nc-color" data-c="'+c+'" aria-pressed="'+(NC.color===c)+'" aria-label="色"></button>';}).join('')+'</div>'+
    '<button type="button" class="btn btn-pri" data-act="nc-add">追加する</button></div></div></div>');
 }
+var noteExport='';
+function notesText(){
+  var l=S.notes.slice().sort(function(a,b){return (!!a.done-!!b.done)||((a.at||0)-(b.at||0));});
+  return '【ペアマネ 要望メモ】'+today()+' 時点・'+l.length+'件\n'+l.map(function(n,i){
+    return (i+1)+'. '+(n.done?'[完了] ':'')+String(n.text||'').replace(/\s*\n\s*/g,' / ')+'（'+(n.by&&S.members[n.by]?nm(n.by):'')+(n.at?' '+md(ds(new Date(n.at))):'')+'）';
+  }).join('\n');
+}
 function paintNotes(){
   var l=S.notes.slice().sort(function(a,b){return (b.at||0)-(a.at||0);});
   showSheet('<div class="sheet" role="dialog" aria-label="機能追加・要望メモ"><div class="sheet-in">'+sheetHead('機能追加・要望メモ')+
    '<div class="card sec"><label class="sub" for="note-in">やりたいこと、気づいたこと</label><textarea id="note-in" class="field" style="height:84px" maxlength="300" placeholder="例: レシートの写真を残したい">'+esc(noteText)+'</textarea><button type="button" class="btn btn-pri" style="height:44px" data-act="note-add">メモを追加</button></div>'+
+   (l.length?'<div class="row" style="gap:10px"><button type="button" class="btn btn-soft grow" style="height:44px" data-act="note-copy">全部まとめてコピー</button></div>'+(noteExport?'<div class="card sec" style="gap:8px"><div class="sub">自動でコピーできなかったので、下の文字を長押ししてすべて選択し、コピーしてください</div><textarea id="note-export" class="field" style="height:160px" readonly>'+esc(noteExport)+'</textarea></div>':''):'')+
    '<div class="sec">'+(l.length?l.map(function(n){
      return '<div class="item" style="cursor:default'+(n.done?';opacity:.6':'')+'"><button type="button" class="swatch" style="--c:'+(n.done?'var(--pri)':'var(--field)')+';color:#fff;display:flex;align-items:center;justify-content:center" data-act="note-done" data-id="'+n.id+'" aria-pressed="'+!!n.done+'" aria-label="完了">'+(n.done?svg('check',3).replace('<svg','<svg width="16" height="16"'):'')+'</button><div class="grow"><div style="'+(n.done?'text-decoration:line-through':'')+';white-space:pre-wrap;word-break:break-word">'+esc(n.text)+'</div><div class="sub">'+esc(n.by&&S.members[n.by]?nm(n.by):'')+' ・ '+(n.at?md(ds(new Date(n.at))):'')+'</div></div><button type="button" class="pill" data-act="note-del" data-id="'+n.id+'">削除</button></div>';
    }).join(''):'<div class="empty">まだメモはありません。ふたりで共有されます</div>')+'</div></div></div>');
@@ -1050,7 +1058,12 @@ document.addEventListener('click',function(ev){
      if(t.getAttribute('data-arm')){var cid=t.getAttribute('data-id'),up3={};S.cats=S.cats.filter(function(x){return x.id!==cid;});up3.cats=S.cats;up3['budgets.'+cid]=deleteField();delete S.budgets[cid];patchCouple(up3);paintCats();toast('削除しました(記録はそのまま残ります)');}
      else{t.setAttribute('data-arm','1');t.textContent='もう一度';}
      break;
-   case 'notes-open':paintNotes();break;
+   case 'notes-open':noteExport='';paintNotes();break;
+   case 'note-copy':
+     var ntxt=notesText();
+     var nfb=function(){noteExport=ntxt;paintNotes();var ta=document.getElementById('note-export');if(ta){ta.focus();ta.select();}};
+     if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(ntxt).then(function(){noteExport='';toast(S.notes.length+'件をコピーしました。チャットに貼り付けてください');},nfb);else nfb();
+     break;
    case 'note-add':
      if(!noteText.trim()){toast('メモを入力してください');break;}
      putDoc('notes',{id:uid(),text:noteText.trim(),by:me(),at:Date.now(),done:false});noteText='';paintNotes();toast('メモを追加しました');break;
